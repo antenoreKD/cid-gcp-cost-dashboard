@@ -1,12 +1,16 @@
 dashboards:
-  'GCP COST DASHBOARD ':
+  'GCP COST DASHBOARD':
     dependsOn:
       datasets:
       - gcp_currency
       - gcp_summary_with_pricing
     name: 'GCP Cost Dashboard '
-    dashboardId: gcp-cost-dashboard
-    templateId: gcp-cost-dashboard
+    dashboardId: gcp-cost-dashboard-v2
+    #templateId: gcp-cost-dashboard
+    category: Custom
+    templateId: gcp-v2
+    sourceAccountId: '905125075217'
+    region: eu-west-1
 datasets:
   gcp_currency:
     data:
@@ -94,6 +98,7 @@ datasets:
               Type: STRING
             - Name: currency_conversion_rate
               Type: DECIMAL
+              SubType: FLOAT
         8b01bdf9-c27f-4ea7-b877-78efc3535910:
           RelationalTable:
             DataSourceArn: ${athena_datasource_arn}
@@ -153,6 +158,7 @@ datasets:
               Type: STRING
             - Name: currency_conversion_rate
               Type: DECIMAL
+              SubType: FLOAT
             - Name: cost_type
               Type: STRING
             - Name: credits
@@ -185,49 +191,33 @@ datasets:
               Type: STRING
             - Name: credits_sustained_usage_discount_amount
               Type: DECIMAL
+              SubType: FLOAT
             - Name: credits_commited_usage_discount_amount
               Type: DECIMAL
+              SubType: FLOAT
             - Name: credits_promotion_amount
               Type: DECIMAL
+              SubType: FLOAT
             - Name: credits_free_tier_amount
               Type: DECIMAL
+              SubType: FLOAT
             - Name: credits_discount_amount
               Type: DECIMAL
+              SubType: FLOAT
             - Name: credits_total_amount
               Type: DECIMAL
+              SubType: FLOAT
             - Name: cost
               Type: DECIMAL
+              SubType: FLOAT
             - Name: usage_amount_in_pricing_units
               Type: DECIMAL
+              SubType: FLOAT
+            - Name: cost_at_list
+              Type: DECIMAL
+              SubType: FLOAT
       LogicalTableMap:
-        86f74f9c-a214-46d4-a98d-1bbd1f76950e:
-          Alias: gcp_current_pricing
-          DataTransforms:
-          - RenameColumnOperation:
-              ColumnName: sku_id
-              NewColumnName: sku_id[gcp_current_pricing]
-          - RenameColumnOperation:
-              ColumnName: sku_description
-              NewColumnName: sku_description[gcp_current_pricing]
-          - RenameColumnOperation:
-              ColumnName: service_id
-              NewColumnName: service_id[gcp_current_pricing]
-          - RenameColumnOperation:
-              ColumnName: service_description
-              NewColumnName: service_description[gcp_current_pricing]
-          - RenameColumnOperation:
-              ColumnName: billing_account_id
-              NewColumnName: billing_account_id[gcp_current_pricing]
-          - RenameColumnOperation:
-              ColumnName: currency_conversion_rate
-              NewColumnName: currency_conversion_rate[gcp_current_pricing]
-          Source:
-            PhysicalTableId: 88abd129-1934-46f7-8ff4-42180008f9f5
-        88a9affa-fae9-4dfe-a915-91b12cb3b4d9:
-          Alias: gcp_summary
-          Source:
-            PhysicalTableId: 8b01bdf9-c27f-4ea7-b877-78efc3535910
-        a1422043-6aea-4879-a4bf-a683543695c3:
+        23a6a431-649c-48ca-8868-39f1b1c43dee:
           Alias: Intermediate Table
           DataTransforms:
           - TagColumnOperation:
@@ -289,6 +279,7 @@ datasets:
               - credits_total_amount
               - cost
               - usage_amount_in_pricing_units
+              - cost_at_list
               - sku_id[gcp_current_pricing]
               - sku_description[gcp_current_pricing]
               - service_id[gcp_current_pricing]
@@ -317,6 +308,33 @@ datasets:
               Type: LEFT
               OnClause: '{sku_id} = {sku_id[gcp_current_pricing]} AND {billing_account_id}
                 = {billing_account_id[gcp_current_pricing]}'
+        86f74f9c-a214-46d4-a98d-1bbd1f76950e:
+          Alias: gcp_current_pricing
+          DataTransforms:
+          - RenameColumnOperation:
+              ColumnName: sku_id
+              NewColumnName: sku_id[gcp_current_pricing]
+          - RenameColumnOperation:
+              ColumnName: sku_description
+              NewColumnName: sku_description[gcp_current_pricing]
+          - RenameColumnOperation:
+              ColumnName: service_id
+              NewColumnName: service_id[gcp_current_pricing]
+          - RenameColumnOperation:
+              ColumnName: service_description
+              NewColumnName: service_description[gcp_current_pricing]
+          - RenameColumnOperation:
+              ColumnName: billing_account_id
+              NewColumnName: billing_account_id[gcp_current_pricing]
+          - RenameColumnOperation:
+              ColumnName: currency_conversion_rate
+              NewColumnName: currency_conversion_rate[gcp_current_pricing]
+          Source:
+            PhysicalTableId: 88abd129-1934-46f7-8ff4-42180008f9f5
+        88a9affa-fae9-4dfe-a915-91b12cb3b4d9:
+          Alias: gcp_summary
+          Source:
+            PhysicalTableId: 8b01bdf9-c27f-4ea7-b877-78efc3535910
       ImportMode: SPICE
     dependsOn:
       views:
@@ -324,69 +342,70 @@ datasets:
       - gcp_summary
     schedules:
     - default
+crawlers: {}
 views:
   gcp_currency:
     data: |-
-      CREATE OR REPLACE VIEW "gcp_currency" AS 
+      CREATE OR REPLACE VIEW ${athena_database_name}.gcp_currency AS
       SELECT
         currency
       , COALESCE(symbol, currency) symbol
       FROM
         (
-        WITH
-          char_map AS (
+         WITH
+           char_map AS (
             SELECT
               trigram
             , symbol
             FROM
               (
-              VALUES 
-                ROW ('EUR', U&'\20AC')
-              , ROW ('NOK', 'kr')
-              , ROW ('BRL', 'R$')
-              , ROW ('CAD', 'C$')
-              , ROW ('CZK', U&'K\010D')
-              , ROW ('DKK', 'kr')
-              , ROW ('HKD', 'HK$')
-              , ROW ('INR', U&'\20B9')
-              , ROW ('IDR', 'Rp')
-              , ROW ('ILS', U&'\20AA')
-              , ROW ('JPY', U&'\00A5')
-              , ROW ('CHF', 'CHF')
-              , ROW ('MYR', 'RM')
-              , ROW ('MXN', '$')
-              , ROW ('NZD', '$')
-              , ROW ('PLN', U&'z\0142')
-              , ROW ('RUB', U&'\20BD')
-              , ROW ('SGD', 'S$')
-              , ROW ('KRW', U&'\20A9')
-              , ROW ('SEK', 'kr')
-              , ROW ('TWD', 'NT$')
-              , ROW ('THB', U&'\0E3F')
-              , ROW ('TRY', U&'\20BA')
-              , ROW ('USD', '$')
-              , ROW ('GBP', U&'\00A3')
-              , ROW ('VND', U&'\20AB')
+       VALUES
+                 ROW ('EUR', U&'\20AC')
+               , ROW ('NOK', 'kr')
+               , ROW ('BRL', 'R$')
+               , ROW ('CAD', 'C$')
+               , ROW ('CZK', U&'K\010D')
+               , ROW ('DKK', 'kr')
+               , ROW ('HKD', 'HK$')
+               , ROW ('INR', U&'\20B9')
+               , ROW ('IDR', 'Rp')
+               , ROW ('ILS', U&'\20AA')
+               , ROW ('JPY', U&'\00A5')
+               , ROW ('CHF', 'CHF')
+               , ROW ('MYR', 'RM')
+               , ROW ('MXN', '$')
+               , ROW ('NZD', '$')
+               , ROW ('PLN', U&'z\0142')
+               , ROW ('RUB', U&'\20BD')
+               , ROW ('SGD', 'S$')
+               , ROW ('KRW', U&'\20A9')
+               , ROW ('SEK', 'kr')
+               , ROW ('TWD', 'NT$')
+               , ROW ('THB', U&'\0E3F')
+               , ROW ('TRY', U&'\20BA')
+               , ROW ('USD', '$')
+               , ROW ('GBP', U&'\00A3')
+               , ROW ('VND', U&'\20AB')
             )  currency_data (trigram, symbol)
-        ) 
-        SELECT *
-        FROM
-          ((
+         )
+         SELECT *
+         FROM
+           ((
       (
-              SELECT DISTINCT currency
-              FROM
-                "gcp_billing_export" gcp
-              LIMIT 1
+               SELECT DISTINCT currency
+               FROM
+                 "gcp_billing_export" gcp
+               LIMIT 1
             ) UNION ALL (
-              SELECT *
-              FROM
-                (
-      VALUES 
+               SELECT *
+               FROM
+                 (
+       VALUES
                     ROW ('USD')
-              )  ignored_table_name (currency)
+               )  ignored_table_name (currency)
             )    )  list
-        LEFT JOIN char_map cm ON (cm.trigram = list.currency))
-      ) 
+         LEFT JOIN char_map cm ON (cm.trigram = list.currency))
+      )
   gcp_current_pricing:
     data: |-
       CREATE OR REPLACE VIEW ${athena_database_name}.gcp_current_pricing AS
@@ -458,7 +477,7 @@ views:
       , TRY(system_labels['compute.googleapis.com/unused_reservation']) system_labels_unused_reservation
       , reduce(transform("filter"(credits, (x) -> (x.type = 'SUSTAINED_USAGE_DISCOUNT')), (x) -> x.name), '', (s, x) -> concat(s, ' | ', x), (s) -> s) credits_sustained_usage_discount_name
       , reduce(transform("filter"(credits, (x) -> (x.type = 'COMMITTED_USAGE_DISCOUNT')), (x) -> x.name), '', (s, x) -> concat(s, ' | ', x), (s) -> s) credits_commited_usage_discount_name
-      , COALESCE('skip', reduce(transform("filter"(credits, (x) -> (x.type = 'PROMOTION')), (x) -> x.name), '', (s, x) -> concat(s, ' | ', x), (s) -> s)) credits_promotion_name
+      , COALESCE('none', reduce(transform("filter"(credits, (x) -> (x.type = 'PROMOTION')), (x) -> x.name), '', (s, x) -> concat(s, ' | ', x), (s) -> s)) credits_promotion_name
       , reduce(transform("filter"(credits, (x) -> (x.type = 'FREE_TIER')), (x) -> x.name), '', (s, x) -> concat(s, ' | ', x), (s) -> s) credits_free_tier_name
       , reduce(transform("filter"(credits, (x) -> (x.type = 'DISCOUNT')), (x) -> x.name), '', (s, x) -> concat(s, ' | ', x), (s) -> s) credits_discount_name
       , sum(reduce(transform("filter"(credits, (x) -> (x.type = 'SUSTAINED_USAGE_DISCOUNT')), (x) -> x.amount), 0, (s, x) -> (s + x), (s) -> s)) credits_sustained_usage_discount_amount
@@ -469,6 +488,7 @@ views:
       , sum(reduce(transform(credits, (x) -> x.amount), 0, (s, x) -> (s + x), (s) -> s)) credits_total_amount
       , "sum"(CAST(cost AS double)) cost
       , "sum"(CAST(usage.amount_in_pricing_units AS double)) usage_amount_in_pricing_units
+      , "sum"(CAST(cost_at_list AS double)) cost_at_list
       FROM
         "gcp_billing_export" gcp
       WHERE ("date_parse"(invoice.month, '%Y%m') > (current_date - INTERVAL  '13' MONTH))
