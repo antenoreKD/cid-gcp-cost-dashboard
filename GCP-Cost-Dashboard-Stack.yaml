@@ -1,4 +1,3 @@
-#Test
 AWSTemplateFormatVersion: "2010-09-09"
 Metadata: 
   AWS::CloudFormation::Interface: 
@@ -11,6 +10,7 @@ Metadata:
           - BucketName
           - GCPFullTableName
           - GCPPricingFullTableName
+          - GCPFocusFullTableName
           - GCPConnectionName
           - Secret
           - SecretARN
@@ -23,6 +23,7 @@ Metadata:
         Parameters: 
           - GCPBillingLocation
           - GCPPricingLocation
+          - GCPFocusLocation
           - GCPJobBookmarkKeys
           - TargetCatalogDBName
     ParameterLabels: 
@@ -42,6 +43,10 @@ Metadata:
       GCPPricingFullTableName:
         Type: String
         Description: GCP Pricing Full Table Id List - To copy a table id, please click on the three dots on the right of the table name and select \"Copy ID\" # DOCUMENTATION
+
+      GCPFocusFullTableName:
+        Type: CommaDelimitedList
+        Description: (Optional) GCP Focus Full Table Id List - To copy a table id, please click on the three dots on the right of the table name and select \"Copy ID\" # DOCUMENTATION
 
       GCPConnectionName:
         Type: String
@@ -79,6 +84,11 @@ Metadata:
         Type: String
         Description: DON'T CHANGE - GCP Pricing Location in S3
         Default: gcp_pricing_export
+      
+      GCPFocusLocation:
+        Type: String
+        Description: DON'T CHANGE - GCP Focus Location in S3
+        Default: gcp_focus_export
 
       GCPJobBookmarkKeys:
         Type: String
@@ -109,7 +119,12 @@ Parameters:
     Type: String
     AllowedPattern: "^[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_]+$"
     Description: GCP Pricing Full Table Id List - To copy a table id, please click on the three dots on the right of the table name and select \"Copy ID\"
-  
+
+  GCPFocusFullTableName:
+    Type: CommaDelimitedList
+    Description: (Optional) GCP Focus Full Table Id List - To copy a table id, please click on the three dots on the right of the table name and select \"Copy ID\"
+    Default: ""
+
   GCPConnectionName:
     Type: String
     Description: GCP Connection Name
@@ -147,6 +162,11 @@ Parameters:
     Type: String
     Description: DON'T CHANGE - GCP Pricing Location in S3
     Default: gcp_pricing_export
+  
+  GCPFocusLocation:
+    Type: String
+    Description: DON'T CHANGE - GCP Focus Location in S3
+    Default: gcp_focus_export
 
   GCPJobBookmarkKeys:
     Type: String
@@ -160,6 +180,7 @@ Parameters:
 
 Conditions:
   StartDateNotEmpty: !Not [!Equals [!Ref StartDate, '']]
+  
 
 Resources:
   GCPLambdaFunction:
@@ -174,22 +195,40 @@ Resources:
           glue_client = boto3.client('glue')
           
           script_location = os.environ.get('ScriptLocation')
+          focus_script_location = os.environ.get('FocusScriptLocation')
           gcp_connection_name = os.environ.get('GCPConnectionName')
           gcp_job_bookmark_keys = os.environ.get('GCPJobBookmarkKeys')
           target_catalog_database_name = os.environ.get('TargetCatalogDBName')
           dynamodb_admin_job_table_name = os.environ.get('DynamoDBAdminJobTable')
-          gcp_billing_full_table_names = os.environ.get('GCPFullTableName').split(";")
+          gcp_billing_full_table_names = os.environ.get('GCPFullTableName')
+          if gcp_billing_full_table_names is not None:
+              gcp_billing_full_table_names = gcp_billing_full_table_names.split(";")
+          else:
+              gcp_billing_full_table_names = []
           gcp_pricing_full_table_name = os.environ.get('GCPPricingFullTableName')
+          gcp_focus_full_table_names = os.environ.get('GCPFocusFullTableName')
+          if gcp_focus_full_table_names is not None:
+              gcp_focus_full_table_names = gcp_focus_full_table_names.split(";")
+          else:
+              gcp_focus_full_table_names = []
           glue_role = os.environ.get('GlueRoleArn')
           billing_crawler_name = os.environ.get('BillingCrawlerName')
           pricing_crawler_name = os.environ.get('PricingCrawlerName')
+          focus_crawler_name = os.environ.get('FocusCrawlerName')
           billing_target_s3_path = os.environ.get('BillingTargetS3Path')
           pricing_target_s3_path = os.environ.get('PricingTargetS3Path')
+          focus_target_s3_path = os.environ.get('FocusTargetS3Path')
           security_configuration = os.environ.get('SecurityConfiguration')
           glue_crontab = os.environ.get('GlueCrontab')
           glue_job_trigger = os.environ.get('GlueJobTrigger')
+          glue_focus_job_trigger = os.environ.get('FOCUSGlueJobTrigger')
           glue_crawler_trigger = os.environ.get('GlueCrawlerTrigger')
+          focus_glue_crawler_trigger = os.environ.get('FocusGlueCrawlerTrigger')
           glue_workflow = os.environ.get('GlueWorkflow')
+          glue_focus_workflow = os.environ.get('GlueFocusWorkflow')
+          script_bucket = os.environ.get('ScriptBucketName')
+          shuffle_bucket = "spark.shuffle.glue.s3ShuffleBucket=s3://"+script_bucket+"/shuffle/"
+          kms_key_arn = os.environ.get('KmsKeyArn')
           
           def create_glue_job_trigger(job_names):
               trigger_name = glue_job_trigger
@@ -234,9 +273,54 @@ Resources:
                   except Exception as exc:
                       print(f'ERROR Creating {trigger_name}: {exc}')
           
-          def create_glue_crawler_trigger(job_names,billing_crawler_name,pricing_crawler_name):
+          def create_focus_glue_job_trigger(job_names):
+              trigger_name = glue_focus_job_trigger
+              actions = []
+              for job_name in job_names:
+                action = {
+                          'JobName': job_name,
+                          'Arguments': {}
+                }
+                actions.append(action)
+              # Check if the triggers already exist
+              try:
+                  glue_client.get_trigger(Name=trigger_name)
+                  print(f'trigger {trigger_name} exists, updating..')
+                  try:
+                      glue_client.update_trigger(
+                          Name=trigger_name,
+                          TriggerUpdate={
+                              'Name': trigger_name,
+                              'Description': "Trigger for running GCP FOCUS Glue Jobs every 24 hours",
+                              'Actions': actions,
+                              #'WorkflowName': glue_workflow,
+                              'Schedule': "cron("+glue_crontab+")"
+                          }
+                      )
+                  except Exception as exc:
+                      print(f'ERROR Updating {trigger_name}: {exc}')
+                  return
+              except glue_client.exceptions.EntityNotFoundException:
+                  print(f'Creating {trigger_name}')
+                  try:
+                      glue_client.create_trigger(
+                          Name=trigger_name,
+                          #Description="Trigger for running " + job_name + " every 24 hours",
+                          Description="Trigger for running GCP FOCUS Glue Job every 24 hours",
+                          Type='SCHEDULED',
+                          Actions=actions,
+                          StartOnCreation=True,
+                          WorkflowName=glue_focus_workflow,
+                          Schedule="cron("+glue_crontab+")"
+                      )
+                  except Exception as exc:
+                      print(f'ERROR Creating {trigger_name}: {exc}')
+          
+          def create_glue_crawler_trigger(job_names,focus_job_names,billing_crawler_name,pricing_crawler_name,focus_crawler_name):
               trigger_name = glue_crawler_trigger
+              focus_trigger_name = focus_glue_crawler_trigger
               conditions = []
+              focus_conditions = []
               for job_name in job_names:
                 condition = {
                     'LogicalOperator': "EQUALS",
@@ -244,6 +328,13 @@ Resources:
                     'State': "SUCCEEDED"
                 }
                 conditions.append(condition)
+              for focus_job_name in focus_job_names:
+                focus_condition = {
+                    'LogicalOperator': "EQUALS",
+                    'JobName': focus_job_name,
+                    'State': "SUCCEEDED"
+                }
+                focus_conditions.append(focus_condition)
               try:
                   # Check if the triggers already exist
                   glue_client.get_trigger(Name=trigger_name)
@@ -270,7 +361,26 @@ Resources:
                           }
                       )
                   except Exception as exc:
-                    print(f'ERROR creating trigger {trigger_name}: {exc}')
+                    print(f'ERROR updating trigger {trigger_name}: {exc}')
+                  try: 
+                      glue_client.update_trigger(
+                          Name=focus_trigger_name,
+                          TriggerUpdate={
+                              'Name': focus_trigger_name,
+                              'Description': "Trigger for running " + focus_crawler_name + " conditionally",
+                              'Predicate': {
+                                'Logical':'AND',
+                                'Conditions': focus_conditions
+                              },
+                              'Actions': [{
+                                  'CrawlerName': focus_crawler_name,
+                                  'Arguments': {}
+                                }
+                              ]
+                          }
+                      )
+                  except Exception as exc:
+                    print(f'ERROR updating FOCUS trigger {trigger_name}: {exc}')
                   return
               except glue_client.exceptions.EntityNotFoundException:
                   print(f'Creating {trigger_name}')
@@ -296,9 +406,29 @@ Resources:
                           ]
                       )
                   except Exception as exc:
-                    print(f'ERROR creating trigger {trigger_name}: {exc}')     
+                    print(f'ERROR creating trigger {trigger_name}: {exc}')
+                  print(f'Creating {focus_trigger_name}')
+                  try:
+                      glue_client.create_trigger(
+                          Name=focus_trigger_name,
+                          Description="Trigger for running " + focus_crawler_name + " conditionally",
+                          Type='CONDITIONAL',
+                          WorkflowName=glue_focus_workflow,
+                          StartOnCreation=True,
+                          Predicate={
+                            'Logical':'AND',
+                            'Conditions': focus_conditions
+                          },
+                          Actions=[{
+                              'CrawlerName': focus_crawler_name,
+                              'Arguments': {}
+                            }
+                          ]
+                      )
+                  except Exception as exc:
+                    print(f'ERROR creating trigger {focus_trigger_name}: {exc}')
           
-          def create_glue_job(job_name, table_name, target_s3_path):
+          def create_glue_job(job_name, table_name, target_s3_path, script_location, bookmark_keys):
               table_project, table_dataset, table_id = table_name.split('.')
               # check if job exists
               try:
@@ -322,12 +452,17 @@ Resources:
                           '--gcp_parent_project': table_project,
                           '--gcp_full_table_name': table_name,
                           '--gcp_connection_name': gcp_connection_name,
-                          '--gcp_job_bookmark_keys': gcp_job_bookmark_keys,
+                          '--gcp_job_bookmark_keys': bookmark_keys,
                           '--gcp_materialization_dataset': table_dataset,
                           '--target_s3_path': target_s3_path,
                           '--target_catalog_database_name': target_catalog_database_name,
                           '--target_catalog_table_name': target_s3_path.rstrip('/').split('/')[-1],
-                          '--dynamodb_admin_job_table_name': dynamodb_admin_job_table_name
+                          '--dynamodb_admin_job_table_name': dynamodb_admin_job_table_name,
+                          '--write-shuffle-files-to-s3': "true",
+                          '--conf': shuffle_bucket,
+                          '--spark.shuffle.storage.s3.serverSideEncryption.algorithm': "SSE-KMS",
+                          '--spark.shuffle.storage.s3.serverSideEncryption.kms.key': kms_key_arn
+
                       },
                       SecurityConfiguration=security_configuration,
                       WorkerType="G.1X",
@@ -358,6 +493,7 @@ Resources:
               """ create jobs """
               response = {}
               job_names=[]
+              focus_job_names=[]
           
               #Create jobs for each billing table
               for table_name in gcp_billing_full_table_names:
@@ -368,6 +504,8 @@ Resources:
                       job_name=job_name,
                       table_name=table_name,
                       target_s3_path=billing_target_s3_path,
+                      script_location=script_location,
+                      bookmark_keys=gcp_job_bookmark_keys
                   )
           
               #Create job for pricing
@@ -378,15 +516,33 @@ Resources:
                   job_name=job_name,
                   table_name=gcp_pricing_full_table_name,
                   target_s3_path=pricing_target_s3_path,
+                  script_location=script_location,
+                  bookmark_keys=gcp_job_bookmark_keys
               )
+
+              #Create jobs for each focus table
+              for table_name in gcp_focus_full_table_names:
+                  job_name = f'GcpApp_Focus_{table_name}'
+                  focus_job_names.append(job_name)
+                  print(f'Creating Focus Glue Job {job_name} ..')
+                  response[table_name] = create_glue_job(
+                      job_name=job_name,
+                      table_name=table_name,
+                      target_s3_path=focus_target_s3_path,
+                      script_location=focus_script_location,
+                      bookmark_keys="x_ExportTime"
+                  )
           
               # Create triggers for jobs and crawlers
               print(f"Updating triggers for CID GCP Glue Jobs..")
               create_glue_job_trigger(job_names)
+              create_focus_glue_job_trigger(focus_job_names)
               print(f"Updating triggers for {billing_crawler_name} and {pricing_crawler_name}..")
-              create_glue_crawler_trigger(job_names,billing_crawler_name,pricing_crawler_name)
+              create_glue_crawler_trigger(job_names,focus_job_names,billing_crawler_name,pricing_crawler_name,focus_crawler_name)
               print(f"Start run of the workflow: {glue_workflow}")
               glue_client.start_workflow_run(Name=glue_workflow)
+              print(f"Start run of the workflow: {glue_focus_workflow}")
+              glue_client.start_workflow_run(Name=glue_focus_workflow)
               return response
           
           def on_delete():
@@ -407,6 +563,14 @@ Resources:
               response[gcp_pricing_full_table_name] = delete_glue_job(
                   job_name=job_name,
               )
+              
+              #Delete jobs for each focus table
+              for table_name in gcp_focus_full_table_names:
+                  job_name = f'GcpApp_Focus_{table_name}'
+                  job_names.append(job_name)
+                  response[table_name] = delete_glue_job(
+                      job_name=job_name,
+                  )
 
               #Delete triggers
               response[glue_job_trigger]=delete_trigger(glue_job_trigger)
@@ -437,11 +601,15 @@ Resources:
       Environment:
         Variables:
           GCPFullTableName: !Join [";", !Ref GCPFullTableName]
-          ScriptLocation: !Sub "s3://${Prefix}-${BucketName}-script/glue_script.py"         
+          GCPFocusFullTableName: !Join [";", !Ref GCPFocusFullTableName]
+          ScriptBucketName: !Sub "${Prefix}-${BucketName}-script"
+          ScriptLocation: !Sub "s3://${Prefix}-${BucketName}-script/glue_script.py"      
+          FocusScriptLocation: !Sub "s3://${Prefix}-${BucketName}-script/focus_glue_script.py"   
           GCPConnectionName: !Ref GCPConnectionName
           GCPJobBookmarkKeys: !Ref GCPJobBookmarkKeys
           BillingTargetS3Path: !Sub "s3://${Prefix}-${BucketName}/${GCPBillingLocation}/"
           PricingTargetS3Path: !Sub "s3://${Prefix}-${BucketName}/${GCPPricingLocation}/"
+          FocusTargetS3Path: !Sub "s3://${Prefix}-${BucketName}/${GCPFocusLocation}/"
           TargetCatalogDBName: !Ref TargetCatalogDBName
           DynamoDBAdminJobTable: !Select [1, !Split ['/', !GetAtt DynamoDBAdminJobTable.Arn]]
           GCPPricingLocation: !Ref GCPPricingLocation
@@ -450,10 +618,15 @@ Resources:
           SecurityConfiguration: !Ref GlueSecurityConfiguration
           BillingCrawlerName: !Sub "${Prefix}-GCP_Billing_Crawler"
           PricingCrawlerName: !Sub "${Prefix}-GCP_Pricing_Crawler"
+          FocusCrawlerName: !Sub "${Prefix}-GCP_Focus_Crawler"
           GlueJobTrigger: !Sub "${Prefix}-Glue_Jobs_Trigger"
+          FOCUSGlueJobTrigger: !Sub "${Prefix}-Glue_FOCUS_Jobs_Trigger"
           GlueCrawlerTrigger: !Sub "${Prefix}-Glue_Crawlers_Trigger"
+          FocusGlueCrawlerTrigger: !Sub "${Prefix}-Focus_Glue_Crawler_Trigger"
           GlueCrontab: !Ref GlueCrontab
           GlueWorkflow: !Sub ${Prefix}-workflow
+          GlueFocusWorkflow: !Sub ${Prefix}-focus-workflow
+          KmsKeyArn: !GetAtt KMSKey.Arn
 
   GlueRole:
     Type: AWS::IAM::Role
@@ -546,7 +719,7 @@ Resources:
                 Service: lambda.amazonaws.com
               Action: sts:AssumeRole
         Policies:
-          - PolicyName: GCPDashboardPolicy
+          - PolicyName: !Sub "${Prefix}-GCPDashboardPolicy"
             PolicyDocument:
               Version: '2012-10-17'
               Statement:
@@ -618,13 +791,16 @@ Resources:
     Type: Custom::LambdaInvoker
     Properties:
       ServiceToken: !GetAtt GCPLambdaFunction.Arn
-      ScriptBucketName: !Sub ${Prefix}-${BucketName}-script
       GCPFullTableName: !Join [";", !Ref GCPFullTableName]
-      ScriptLocation: !Sub "s3://${Prefix}-${BucketName}-script/glue_script.py"         
+      GCPFocusFullTableName: !Join [";", !Ref GCPFocusFullTableName]
+      ScriptBucketName: !Sub "${Prefix}-${BucketName}-script"
+      ScriptLocation: !Sub "s3://${Prefix}-${BucketName}-script/glue_script.py"      
+      FocusScriptLocation: !Sub "s3://${Prefix}-${BucketName}-script/focus_glue_script.py"   
       GCPConnectionName: !Ref GCPConnectionName
       GCPJobBookmarkKeys: !Ref GCPJobBookmarkKeys
       BillingTargetS3Path: !Sub "s3://${Prefix}-${BucketName}/${GCPBillingLocation}/"
       PricingTargetS3Path: !Sub "s3://${Prefix}-${BucketName}/${GCPPricingLocation}/"
+      FocusTargetS3Path: !Sub "s3://${Prefix}-${BucketName}/${GCPFocusLocation}/"
       TargetCatalogDBName: !Ref TargetCatalogDBName
       DynamoDBAdminJobTable: !Select [1, !Split ['/', !GetAtt DynamoDBAdminJobTable.Arn]]
       GCPPricingLocation: !Ref GCPPricingLocation
@@ -633,10 +809,15 @@ Resources:
       SecurityConfiguration: !Ref GlueSecurityConfiguration
       BillingCrawlerName: !Sub "${Prefix}-GCP_Billing_Crawler"
       PricingCrawlerName: !Sub "${Prefix}-GCP_Pricing_Crawler"
+      FocusCrawlerName: !Sub "${Prefix}-GCP_Focus_Crawler"
       GlueJobTrigger: !Sub "${Prefix}-Glue_Jobs_Trigger"
-      CrawlerTrigger: !Sub "${Prefix}-Glue_Crawlers_Trigger"
+      FOCUSGlueJobTrigger: !Sub "${Prefix}-Glue_FOCUS_Jobs_Trigger"
+      GlueCrawlerTrigger: !Sub "${Prefix}-Glue_Crawlers_Trigger"
       GlueCrontab: !Ref GlueCrontab
       GlueWorkflow: !Sub ${Prefix}-workflow
+      GlueFocusWorkflow: !Sub ${Prefix}-focus-workflow
+      KmsKeyArn: !GetAtt KMSKey.Arn
+      
 
   GlueWorkflow:
     Type: AWS::Glue::Workflow
@@ -644,6 +825,13 @@ Resources:
       Description: "Glue Workflow to manage CID GCP Glue Jobs and Crawlers"
       MaxConcurrentRuns: 100
       Name: !Sub ${Prefix}-workflow
+
+  FocusGlueWorkflow:
+    Type: AWS::Glue::Workflow
+    Properties:
+      Description: "Glue Workflow to manage CID GCP FOCUS Glue Jobs and Crawlers"
+      MaxConcurrentRuns: 100
+      Name: !Sub ${Prefix}-focus-workflow
 
   KMSKey:
     Type: "AWS::KMS::Key"
@@ -762,6 +950,22 @@ Resources:
         UpdateBehavior: "UPDATE_IN_DATABASE"
         DeleteBehavior: "DEPRECATE_IN_DATABASE"
 
+  GlueFocusCrawler:
+    Type: "AWS::Glue::Crawler"
+    Properties:
+      Role: !GetAtt GcpBillingCrawlerRole.Arn
+      CrawlerSecurityConfiguration: !Ref GlueSecurityConfiguration
+      DatabaseName: !Ref TargetCatalogDBName
+      Name: !Sub "${Prefix}-GCP_Focus_Crawler"
+      Description: "Crawler to recursively crawl data from S3 for GCP FOCUS Format"
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${Prefix}-${BucketName}/${GCPFocusLocation}/" 
+            Exclusions: []
+      SchemaChangePolicy:
+        UpdateBehavior: "UPDATE_IN_DATABASE"
+        DeleteBehavior: "DEPRECATE_IN_DATABASE" 
+
   DynamoDBAdminJobTable:
     Type: AWS::DynamoDB::Table
     Properties:
@@ -784,7 +988,7 @@ Resources:
     Type: 'AWS::IAM::Role'
     Condition: StartDateNotEmpty
     Properties:
-      RoleName: 'PutItemLambdaRole'
+      RoleName: !Sub "${Prefix}-PutItemLambdaRole"
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -793,7 +997,7 @@ Resources:
               Service: 'lambda.amazonaws.com'
             Action: 'sts:AssumeRole'
       Policies:
-        - PolicyName: 'DynamoDBAccessPolicy'
+        - PolicyName: !Sub "${Prefix}-DynamoDBAccessPolicy"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -804,7 +1008,7 @@ Resources:
                   - 'dynamodb:UpdateItem'
                 Resource:
                   - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${Prefix}-${TargetCatalogDBName}-AdminJobTable"
-        - PolicyName: 'PutItemLambdaExecutionPolicy'
+        - PolicyName: !Sub "${Prefix}-PutItemLambdaExecutionPolicy"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -823,11 +1027,12 @@ Resources:
     Properties:
       Handler: 'index.lambda_handler'
       Role: !GetAtt PutItemLambdaRole.Arn
-      FunctionName: 'PutItemLambdaFunction'
+      FunctionName: !Sub "${Prefix}-PutItemLambdaFunction"
       Runtime: 'python3.12'
       Environment:
         Variables:
           TABLE_NAME: !Ref DynamoDBAdminJobTable
+          SCRIPT_LOCATION: !Sub "s3://${Prefix}-${BucketName}-script/glue_script.py"
           EXPORT_COLUMN_NAME: 'job_bookmark_column'
           EXPORT_VALUE: !Ref GCPJobBookmarkKeys
           VALUE_COLUMN_NAME: 'job_bookmark_value'
@@ -907,7 +1112,7 @@ Resources:
               Service: glue.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: GlueCrawlerPolicy
+        - PolicyName: !Sub "${Prefix}-GlueCrawlerPolicy"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
@@ -1213,6 +1418,141 @@ Resources:
       Handler: index.lambda_handler
       Role: !GetAtt LambdaExecutionRole.Arn
       Runtime: python3.12
+
+  FocusUploadScriptOnDeployment:
+    Type: Custom::UploadS3ObjectResource
+    Properties:
+      ServiceToken: !GetAtt UploadS3ObjectResourceLambdaFunction.Arn
+      Bucket: !Sub ${Prefix}-${BucketName}-script
+      Key: 'focus_glue_script.py'
+      Content: |
+          import sys
+          import os
+          from awsglue.transforms import *
+          from awsglue.utils import getResolvedOptions
+          from pyspark.context import SparkContext
+          from awsglue.context import GlueContext
+          from awsglue.job import Job
+          from pyspark.sql.functions import *
+          import boto3
+          from botocore.exceptions import ClientError
+          import datetime as dt
+
+          args = getResolvedOptions(sys.argv, ['JOB_NAME','gcp_full_table_name', 'gcp_parent_project', 'gcp_materialization_dataset', 'gcp_connection_name','gcp_job_bookmark_keys', 'target_s3_path','target_catalog_database_name', 'target_catalog_table_name','dynamodb_admin_job_table_name'])
+
+          dynamodb_client = boto3.client('dynamodb')
+
+          def source_is_empty(glueContext, dynamic_frame):
+              if len(dynamic_frame.toDF().head(1)) == 0:
+                  print("No record Extracted! Committing and exiting job without processing.")
+                  job.commit()
+                  os._exit(0)
+
+          # function to get a column in dataframe       
+          def addTechCol(rec):
+            rec["partitiondate"] = rec['_PARTITIONDATE']
+            rec["partitiontime"] = rec['_PARTITIONTIME']
+            del rec["_PARTITIONDATE"]
+            del rec["_PARTITIONTIME"]
+            return rec
+
+
+          def getJobBookmarkFromDynamoDb(dynamodb_client,dynamodb_bookmark_table_name,glue_job_name):
+              response = dynamodb_client.get_item(TableName=dynamodb_bookmark_table_name, Key={'job_id':{'S':str(glue_job_name)}})
+              if 'Item' in response:
+                  job_bookmark = response['Item']['job_bookmark_value']['S']
+                  return job_bookmark
+              else:
+                  return '1900-01-01 00:00:00.001'
+
+          def putJobBookmarkToDynamoDb(dynamodb_client,dynamodb_bookmark_table_name,glue_job_name,arg_gcp_job_bookmark_keys,bookmark_value):
+              dyn_event = {}
+              dyn_event["job_id"] = {'S':str(glue_job_name)}
+              dyn_event["job_bookmark_column"] = {'S':str(arg_gcp_job_bookmark_keys)}
+              dyn_event["job_bookmark_value"] = {'S':str(bookmark_value)}
+              dyn_event["timestamp"] = {'S':str(dt.datetime.utcnow().timestamp()*1000)}
+              try:
+                    ingest_metadata = dynamodb_client.put_item(TableName=dynamodb_bookmark_table_name, Item=dyn_event)
+              except ClientError:
+                    msg = 'Error putting item {} into {} table'.format(dyn_event, table)
+                    print(msg)
+                    raise
+
+          sc = SparkContext()
+          glueContext = GlueContext(sc)
+          spark = glueContext.spark_session
+          job = Job(glueContext)
+          job.init(args['JOB_NAME'], args)
+
+          arg_job_name = args['JOB_NAME']
+          arg_gcp_parent_project = args['gcp_parent_project']
+          arg_gcp_full_table_name = args['gcp_full_table_name']
+          arg_gcp_connection_name = args['gcp_connection_name']
+          arg_gcp_job_bookmark_keys = args['gcp_job_bookmark_keys']
+          arg_gcp_materialization_dataset = args['gcp_materialization_dataset']
+
+          arg_target_s3_path = args['target_s3_path'] 
+          arg_target_catalog_database_name = args['target_catalog_database_name']
+          arg_target_catalog_table_name = args['target_catalog_table_name']
+
+          arg_dynamodb_bookmark_table_name = args['dynamodb_admin_job_table_name']
+
+          job_bookmark_value=getJobBookmarkFromDynamoDb(dynamodb_client,arg_dynamodb_bookmark_table_name,arg_job_name)
+          print(job_bookmark_value)
+          # Script generated for node Google BigQuery Connector 0.24.2 for AWS Glue 3.0
+          GoogleBigQueryConnector0242forAWSGlue30_node1 = glueContext.create_dynamic_frame.from_options(
+              connection_type="bigquery",
+              connection_options={
+                  #"table": arg_gcp_full_table_name, # Not required asused the query parameter
+                  "parentProject": arg_gcp_parent_project,
+                  "viewsEnabled": "true",
+                  "materializationDataset": f"{arg_gcp_materialization_dataset}",
+                  "connectionName": arg_gcp_connection_name,
+                  "sourceType": "query",
+                  "query": f'SELECT *, EXTRACT(DAY FROM x_ExportTime) AS export_day, EXTRACT(MONTH FROM x_ExportTime) AS export_month, EXTRACT(YEAR FROM x_ExportTime) AS export_year FROM `{arg_gcp_full_table_name}` where {arg_gcp_job_bookmark_keys} >"{job_bookmark_value}"',
+              },
+              transformation_ctx="GoogleBigQueryConnector0242forAWSGlue30_node1",
+          )
+
+          #Check if the source dataset is empty. If empty exit.
+          source_is_empty(glueContext,GoogleBigQueryConnector0242forAWSGlue30_node1)
+
+          GoogleBigQueryConnector0242forAWSGlue30_node1 = GoogleBigQueryConnector0242forAWSGlue30_node1.coalesce(1)
+
+          print(GoogleBigQueryConnector0242forAWSGlue30_node1.schema())
+          GoogleBigQueryConnector0242forAWSGlue30_node1 = GoogleBigQueryConnector0242forAWSGlue30_node1.resolveChoice(specs=[("_partitiondate", "cast:timestamp")])
+          GoogleBigQueryConnector0242forAWSGlue30_node1 = GoogleBigQueryConnector0242forAWSGlue30_node1.resolveChoice(specs=[("_partitiontime", "cast:timestamp")])
+          GoogleBigQueryConnector0242forAWSGlue30_node1 = GoogleBigQueryConnector0242forAWSGlue30_node1.resolveChoice(specs=[("usage_end_time", "cast:timestamp")])
+          GoogleBigQueryConnector0242forAWSGlue30_node1 = GoogleBigQueryConnector0242forAWSGlue30_node1.resolveChoice(specs=[("usage_start_time", "cast:timestamp")])
+          #GoogleBigQueryConnector0242forAWSGlue30_node1 = GoogleBigQueryConnector0242forAWSGlue30_node1.map(f = addTechCol)
+          GoogleBigQueryConnector0242forAWSGlue30_node1.printSchema()
+
+
+          # Script generated for node Amazon S3
+          AmazonS3_node = glueContext.getSink(
+              path=arg_target_s3_path,
+              connection_type="s3",
+              updateBehavior="UPDATE_IN_DATABASE",
+              partitionKeys=["BillingAccountId","export_year","export_month","export_day"],
+              compression="snappy",
+              enableUpdateCatalog=True,
+              transformation_ctx="AmazonS3_node",
+          )
+
+          AmazonS3_node.setCatalogInfo(
+              catalogDatabase=arg_target_catalog_database_name, catalogTableName=arg_target_catalog_table_name
+          )
+          AmazonS3_node.setFormat("glueparquet")
+          AmazonS3_node.writeFrame(GoogleBigQueryConnector0242forAWSGlue30_node1)
+
+          max_bookmark_column = GoogleBigQueryConnector0242forAWSGlue30_node1.toDF().select(max(arg_gcp_job_bookmark_keys)).collect()[0][0]
+          max_bookmark_column = max_bookmark_column.strftime("%Y-%m-%d %H:%M:%S.%f")
+          print(max_bookmark_column)
+          putJobBookmarkToDynamoDb(dynamodb_client,arg_dynamodb_bookmark_table_name,arg_job_name,arg_gcp_job_bookmark_keys,max_bookmark_column)
+          job.commit()
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
   
   LambdaExecutionRole:
     Type: AWS::IAM::Role
@@ -1225,7 +1565,7 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
-        - PolicyName: LambdaS3Access
+        - PolicyName: !Sub "${Prefix}-LambdaS3Access"
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
